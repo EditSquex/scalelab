@@ -1,0 +1,157 @@
+version: '3.9'
+
+services:
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: scalelab
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Backend Services
+  # ---------------------------------------------------------------------------
+  url-shortener:
+    build: ./services/url-shortener
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://postgres:password@postgres:5432/scalelab
+      - NODE_ENV=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  rate-limiter:
+    build: ./services/rate-limiter
+    ports:
+      - "3002:3002"
+    environment:
+      - PORT=3002
+      - REDIS_URL=redis://redis:6379
+      - NODE_ENV=production
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  distributed-cache:
+    build: ./services/distributed-cache
+    ports:
+      - "3003:3003"
+    environment:
+      - PORT=3003
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://postgres:password@postgres:5432/scalelab
+      - NODE_ENV=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  job-queue:
+    build: ./services/job-queue
+    ports:
+      - "3004:3004"
+    environment:
+      - PORT=3004
+      - REDIS_URL=redis://redis:6379
+      - NODE_ENV=production
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pub-sub:
+    build: ./services/pub-sub
+    ports:
+      - "3005:3005"
+    environment:
+      - PORT=3005
+      - NODE_ENV=production
+    restart: unless-stopped
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "3006:3006"
+    environment:
+      - PORT=3006
+      - JWT_SECRET=scalelab-secret-key-2024
+      - URL_SHORTENER_URL=http://url-shortener:3001
+      - RATE_LIMITER_URL=http://rate-limiter:3002
+      - CACHE_URL=http://distributed-cache:3003
+      - JOB_QUEUE_URL=http://job-queue:3004
+      - PUB_SUB_URL=http://pub-sub:3005
+      - NODE_ENV=production
+    depends_on:
+      - url-shortener
+      - rate-limiter
+      - distributed-cache
+      - job-queue
+      - pub-sub
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend Dashboard (built separately)
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_URL_SHORTENER=http://localhost:3001
+      - NEXT_PUBLIC_RATE_LIMITER=http://localhost:3002
+      - NEXT_PUBLIC_CACHE=http://localhost:3003
+      - NEXT_PUBLIC_JOB_QUEUE=http://localhost:3004
+      - NEXT_PUBLIC_PUB_SUB=http://localhost:3005
+      - NEXT_PUBLIC_API_GATEWAY=http://localhost:3006
+    depends_on:
+      - url-shortener
+      - rate-limiter
+      - distributed-cache
+      - job-queue
+      - pub-sub
+      - api-gateway
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Persistent Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
